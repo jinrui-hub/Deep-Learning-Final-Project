@@ -1,11 +1,6 @@
-
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Research Context
 
-This is a BME research project reproducing the paper **"LLM-as-RNN"** (arxiv 2601.13352). The core idea: convert a frozen LLM into a recurrent system by maintaining a **natural-language hidden state** (an "evolving summary") that updates at each timestep through feedback-driven text modifications. No model weights are changed — all "learning" happens through prompt rewriting.
+This is a research project reproducing the paper **"LLM-as-RNN"** (arxiv 2601.13352). The core idea: convert a frozen LLM into a recurrent system by maintaining a **natural-language hidden state** (an "evolving summary") that updates at each timestep through feedback-driven text modifications. No model weights are changed — all "learning" happens through prompt rewriting.
 
 The current focus is **MIMIC-IV discharge diagnosis prediction**: given a patient's sequential hospital visits, predict the discharge diagnosis for each visit. Evaluation uses **Acc@1** and **Acc@5** via an LLM-as-Judge (semantic equivalence, not string matching). Because this is a time-series task, scoring is computed **only on each patient's final visit** — earlier visits serve as context / hidden-state buildup and are not included in the aggregate metric (though their predictions and evaluations are still recorded for qualitative analysis).
 
