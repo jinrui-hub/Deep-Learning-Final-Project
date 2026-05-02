@@ -1,0 +1,267 @@
+# =============================================================================
+# LLM-as-RNN: MIMIC-IV Experiment Configuration
+# Paper: "LLM-as-RNN" (arxiv 2601.13352)
+# =============================================================================
+
+# --- Paths ---
+data:
+  input_path: "data/splits/cleaned_df_val_100.json"
+  output_dir: "results/"
+
+# --- Prediction Model ---
+prediction_model:
+  backend: "vllm"                    # vllm | openai | anthropic | huggingface | portkey
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 4096
+  # vLLM-specific options (used when backend=vllm)
+  cuda_visible_devices: "0"         # pin to GPU 0
+  gpu_memory_utilization: 0.9
+  tensor_parallel_size: 1
+  max_model_len: 8192
+  
+
+# --- Memory Model (RLN prompt_update; independently configurable) ---
+memory_model:
+  backend: "vllm"                    # vllm | openai | anthropic | huggingface | portkey
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 4096
+  # Same-source initialization as prediction_model by default; may differ later.
+  cuda_visible_devices: "1"          # pin to GPU 1 (separate from prediction on GPU 0)
+  gpu_memory_utilization: 0.9
+  tensor_parallel_size: 1
+  max_model_len: 8192
+
+# --- Evaluation Model (intermediate feedback only) ---
+evaluation_model:
+  backend: "vllm"                    # vllm | openai | anthropic | huggingface | portkey
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"
+  cuda_visible_devices: "2"          # pin to GPU 2 (separate from prediction/memory)
+  temperature: 0.3
+  max_tokens: 1536
+  gpu_memory_utilization: 0.9
+  tensor_parallel_size: 1
+  max_model_len: 8192
+
+# --- Final Judge Model (scores last-visit accuracy) ---
+# This model computes Acc@1 / Acc@5 on each patient's final visit.
+# evaluation_model above handles intermediate evaluation feedback only.
+# memory_model above handles prompt_update / memory writing only.
+# portkey: set PORTKEY_API_KEY env var; model_name uses Portkey virtual key format (@org/model)
+final_judge_model:
+  backend: "portkey"                        # vllm | openai | anthropic | huggingface | portkey
+  model_name: "@info-yd4956-anthropic/claude-sonnet-4-5"
+  temperature: 0.3
+  max_tokens: 1536
+
+# --- RLN Configuration ---
+rln:
+  update_frequency: "every_visit"
+  token_budget: 4096
+  max_prompt_length: 4096
+  compress_every_n: 5
+
+# --- Methods to run ---
+methods:
+  - zero_shot
+  - full_history
+  - memprompt
+  - llm_as_rnn
+
+# --- Evaluation ---
+evaluation:
+  metrics:
+    - acc_at_1
+    - acc_at_5
+
+# --- Prompt Templates (from paper Appendix C) ---
+templates:
+
+  system_prompt_init: |
+    You are an expert clinical AI assistant analyzing longitudinal patient records.
+
+    Patient Information:
+    - Patient ID: {patient_id}
+    - Age: {age} years
+    - Gender: {gender}
+    - Primary Conditions: {primary_conditions}
+
+    Evolving Clinical Summary: {evolving_summary}
+
+    Your task is to provide accurate clinical predictions based on the current visit information and patient history.
+
+  prediction_prompt: |
+    You are a clinical AI assistant predicting discharge diagnoses for the current visit.
+
+    CURRENT VISIT SNAPSHOT:
+    - Chief Complaint: {chief_complaint}
+    - Vital Signs: {vitals}
+    - Lab Results: {labs}
+    - Medications on Admission: {medications}
+    - Recent Procedures: {procedures}
+    - History of Present Illness: {history_present_illness}
+    - Past Medical History: {past_medical_history}
+    - Social History: {social_history}
+    - Family History: {family_history}
+    - Physical Exam: {physical_exam}
+    - Pertinent Results: {pertinent_results}
+    - Hospital Course: {hospital_course}
+    - Allergies: {allergies}
+
+    TASK: Provide ONLY the discharge diagnosis predictions. Return JSON with top-5 diagnoses and the primary diagnosis:
+    {{
+      "top_5_diagnoses": [
+        {{"name": "diagnosis1"}},
+        {{"name": "diagnosis2"}},
+        {{"name": "diagnosis3"}},
+        {{"name": "diagnosis4"}},
+        {{"name": "diagnosis5"}}
+      ],
+      "primary_diagnosis": {{"name": "diagnosis1"}}
+    }}
+
+  evaluation_prompt: |
+    You are evaluating predicted discharge diagnoses against ground truth to guide learning.
+
+    PREDICTED OUTPUT (JSON): {prediction}
+
+    GROUND TRUTH DIAGNOSES: {ground_truth_diagnoses}
+
+    Evaluate with SEMANTIC MATCHING (consider broader/narrower terms as correct if clinically equivalent).
+
+    Return JSON with ONLY these fields. Please respond in JSON format:
+    {{
+      "diagnosis_evaluation": {{
+        "primary_correct": true/false,
+        "any_top5_correct": true/false,
+        "missed_diagnoses": ["diagnosis1", "diagnosis2"],
+        "why_missed": "brief reason for misses"
+      }},
+      "improvement_suggestions": "detailed suggestion on how to improve future predictions"
+    }}
+
+  prompt_update: |
+    You are updating a clinical AI system's memory to learn from prediction errors.
+
+    CURRENT EVOLVING SUMMARY: {current_evolving_summary}
+
+    PATIENT'S ACTUAL MEDICAL HISTORY (from all previous visits): {patient_history}
+
+    EVALUATION FEEDBACK (Prediction vs Ground Truth): {evaluation_feedback}
+
+    VISIT CONTEXT: {visit_summary}
+
+    CRITICAL INSTRUCTIONS:
+    - The evaluation feedback contains LLM JUDGE analysis with: what diagnoses were MISSED and WHY, what clinical signs were OVERLOOKED, and specific improvement suggestions.
+    - The PATIENT HISTORY shows the ACTUAL diagnoses and treatments across visits.
+    - Your task: Update the evolving summary to incorporate past learnings, current status, and future considerations.
+
+    PAY SPECIAL ATTENTION TO:
+    - "missed_diagnoses" - what we failed to predict
+    - "why_missed" - root cause of our errors
+    - "improvement_suggestions" - single concise sentence
+
+    Create a CONCISE evolving summary (MAX 200 words total) with three short sections:
+    1. CLINICAL HISTORY (2-3 sentences max): List key diagnoses from patient history with visit numbers. Note recurring conditions.
+    2. FOCUS AREAS (2-3 key points): What diagnoses were missed in this visit? Why were they missed?
+    3. FUTURE CONSIDERATIONS (1-2 key points): What to watch for based on patient's actual conditions.
+
+    CRITICAL: Keep it brief and focused. Stop after completing the JSON structure.
+
+    Provide the updated evolving summary as JSON:
+    {{
+      "evolving_summary": "unified summary with three sections: CLINICAL HISTORY, CURRENT STATUS & FOCUS AREAS, and KEY CONSIDERATIONS FOR FUTURE VISITS"
+    }}
+
+  prompt_compression: |
+    The following system prompt has become too long and needs compression:
+
+    {long_system_prompt}
+
+    Task: Create a compressed version that:
+    1. Retains all critical clinical information
+    2. Removes redundancy
+    3. Keeps the most recent and relevant updates
+    4. Maintains the same structure (Focus Areas, Status, Considerations)
+    5. Stays under 250 words
+
+    Provide the compressed prompt maintaining the same JSON structure.
+
+  # Baseline: Zero-Shot (paper Appendix C.3)
+  zero_shot_prompt: |
+    You are an expert clinical AI assistant. Analyze the following patient visit and provide:
+    1. Top-5 diagnoses (ranked by likelihood)
+    2. Primary diagnosis
+
+    Current Visit Information:
+    - Patient Demographics: Age {age}, Gender {gender}
+    - Chief Complaint: {chief_complaint}
+    - Vital Signs: {vital_signs}
+    - Lab Results: {lab_results}
+    - Current Medications: {medications}
+    - Recent Procedures: {procedures}
+
+    TASK: Provide ONLY the discharge diagnosis predictions. Return JSON with top-5 diagnoses and the primary diagnosis:
+    {{
+      "top_5_diagnoses": [
+        {{"name": "diagnosis1"}},
+        {{"name": "diagnosis2"}},
+        {{"name": "diagnosis3"}},
+        {{"name": "diagnosis4"}},
+        {{"name": "diagnosis5"}}
+      ],
+      "primary_diagnosis": {{"name": "diagnosis1"}}
+    }}
+
+  # Baseline: FHC and MemPrompt (paper Appendix C.3)
+  history_prompt: |
+    You are a clinical decision support system. You have access to a patient's complete visit history with known outcomes (diagnoses and treatments).
+
+    PATIENT VISIT HISTORY (with known outcomes): {patient_history}
+
+    CURRENT VISIT: {current_visit}
+
+    TASK: Based on the patient's complete history and current presentation, provide Top 5 most likely discharge diagnoses (ranked by likelihood, from most likely to least likely).
+
+    Consider:
+    - Patterns from previous visits and their outcomes
+    - Disease progression and comorbidities
+    - Current clinical presentation
+
+    TASK: Provide ONLY the discharge diagnosis predictions. Return JSON with top-5 diagnoses and the primary diagnosis:
+    {{
+      "top_5_diagnoses": [
+        {{"name": "diagnosis1"}},
+        {{"name": "diagnosis2"}},
+        {{"name": "diagnosis3"}},
+        {{"name": "diagnosis4"}},
+        {{"name": "diagnosis5"}}
+      ],
+      "primary_diagnosis": {{"name": "diagnosis1"}}
+    }}
+
+  # For MemPrompt baseline: per-visit summarization
+  visit_summary_prompt: |
+    Summarize the following clinical visit into a concise paragraph (max 100 words) capturing key diagnoses, procedures, and clinical findings:
+
+    Chief Complaint: {chief_complaint}
+    Hospital Course: {hospital_course}
+    Discharge Diagnosis: {discharge_diagnosis}
+    Procedures: {procedures}
+    Pertinent Results: {pertinent_results}
+
+    Return only the summary paragraph, no preamble.
+
+  # Default initial evolving summary (paper Appendix C.1: Default Initialization Value)
+  default_init:
+    evolving_summary: |
+      CLINICAL HISTORY: This is the patient's first visit. No previous medical history available in the system.
+      CURRENT STATUS & FOCUS AREAS:
+      - Establishing baseline assessment
+      - Gathering initial clinical presentation
+      KEY CONSIDERATIONS FOR FUTURE VISITS:
+      - Baseline health status to be established after first visit
+      - Future assessments will track disease progression

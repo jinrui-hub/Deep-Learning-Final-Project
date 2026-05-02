@@ -1,0 +1,81 @@
+# =============================================================================
+# Rubric v1 — 7-dim holistic RaR-style judge prompt
+# Holistic aggregation: a single judge call sees all dimensions and emits ONE
+# digit (1-9) on the final line, decoded into a scalar in (0, 1].
+# =============================================================================
+
+aggregation: holistic_raR             # holistic_raR | per_dim_weighted (Phase 3)
+
+dimensions:
+  - factual_faithfulness
+  - compression_efficiency
+  - predictive_sufficiency
+  - differential_diagnosis_breadth
+  - consistency_with_feedback
+  - anti_drift
+  - calibration
+
+# Score decoding: digit d ∈ {1..9} → d / 9 ∈ (0, 1]
+score_token_format: digit_1_to_9
+
+prompt_template: |
+  You are a clinical hidden-state quality judge. Given a recurrent hidden
+  state h_t (an evolving clinical summary), score its quality from 1 to 9
+  along seven dimensions, then output ONE digit (1-9) as the holistic score.
+
+  PRIOR HIDDEN STATE h_{{t-1}}:
+  {h_prev}
+
+  CURRENT VISIT INPUT x_t:
+  {x_t}
+
+  PREDICTION y_hat_t:
+  {y_hat}
+
+  EVALUATION FEEDBACK e_t:
+  {e_t}
+
+  CANDIDATE NEW HIDDEN STATE h_t:
+  {h_t}
+
+  Dimensions to consider:
+  1. Factual faithfulness to x_{{1..t}} (no hallucinated labs/history)
+  2. Compression efficiency (critical-fact recall per token)
+  3. Predictive sufficiency (does h_t alone let the LLM recover y_hat_t?)
+  4. Differential-diagnosis breadth
+  5. Consistency-with-feedback (was e_t absorbed?)
+  6. Anti-drift (no contradiction with h_{{t-1}} unless feedback-grounded)
+  7. Calibration (uncertainty markers where appropriate)
+
+  After your reasoning, output exactly this on the final line (replace N with 1-9):
+  Score: N
+
+# =============================================================================
+# Judge model + serving config — single source of truth
+# Same yaml drives:
+#   - rubric_reward.compute_score (HTTP-call to endpoint with model)
+#   - apptainer/start_judge_server.sh (vllm serve with model on serve.gpu:port)
+# Swap the judge by editing this section (or copying yaml to rubric_v2.yaml etc.)
+#
+# CURRENT: OpenRubrics/RubricARM-8B-Judge as a smoke-test placeholder.
+# ⚠️ NOTE: RubricARM is PAIRWISE-trained (outputs "Winner: Response A/B"), but our
+# prompt template asks for a single digit. Mismatch → outputs may not parse to a
+# digit → reward falls back to JUDGE_NO_DIGIT_REWARD (0.5). That's FINE for smoke
+# (validates pipeline + fallback logic). For real training, swap to your SFT'd
+# scalar judge (e.g. jinrui-hub/your-sft-judge-v1) once uploaded.
+# =============================================================================
+judge:
+  model: "OpenRubrics/RubricARM-8B-Judge"        # smoke placeholder; swap to your SFT model
+  endpoint: "http://localhost:8001/v1"           # must match serve.port below
+  temperature: 0.0                               # deterministic scoring
+  max_tokens: 1500                               # let CoT-style judges finish; parser keys
+                                                  # off the "Score: N" pattern (final line)
+                                                  # so longer output is fine — no false-positive
+                                                  # digit grabs from intermediate reasoning
+
+serve:
+  gpu: 2                                         # CUDA index inside container
+  port: 8001                                     # OpenAI-compat HTTP port
+  gpu_memory_utilization: 0.9                    # 8B + KV cache fits on 1×A100 40GB at 0.9
+  max_model_len: 8192                            # RubricARM prompts can be long (multi-phase template)
+  dtype: bfloat16

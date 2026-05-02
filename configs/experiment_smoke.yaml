@@ -1,0 +1,82 @@
+# =============================================================================
+# Smoke-test config for the verl_adapter Phase B dumper (and future Phase C).
+#
+# Differences from experiment1_seperateJudge.yaml:
+#   - data.input_path  -> train_100 split (so dumper default = real training data)
+#   - All vLLM models  -> gpu_memory_utilization 0.4 (safer when sharing the
+#                         node with verl's own vLLM rollout worker later)
+#   - max_model_len    -> 4096 (faster vLLM startup; sufficient for our prompts)
+#   - templates_config -> points at experiment1 (no template duplication)
+#
+# Use:
+#   bash training/verl_adapter/apptainer/dump_trajectories.sh \
+#       --config configs/experiment_smoke.yaml \
+#       --split train --max-patients 5
+# =============================================================================
+
+# --- Paths ---
+data:
+  input_path: "data/splits/cleaned_df_train_100.json"
+  output_dir: "results/"
+
+# --- Pull all prompt templates from experiment1 (single source of truth) ---
+templates_config: "configs/experiment1_seperateJudge.yaml"
+
+# --- Prediction Model — pinned to GPU 0 ---
+prediction_model:
+  backend: "vllm"
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"
+  cuda_visible_devices: "0"
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 4096
+  gpu_memory_utilization: 0.4
+  tensor_parallel_size: 1
+  max_model_len: 4096
+
+# --- Memory Model — pinned to GPU 1 ---
+memory_model:
+  backend: "vllm"
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"
+  cuda_visible_devices: "1"
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 4096
+  gpu_memory_utilization: 0.4
+  tensor_parallel_size: 1
+  max_model_len: 4096
+
+# --- Evaluation Model — pinned to GPU 2 ---
+evaluation_model:
+  backend: "vllm"
+  model_name: "meta-llama/Llama-3.2-3B-Instruct"
+  cuda_visible_devices: "2"
+  temperature: 0.3
+  max_tokens: 1536
+  gpu_memory_utilization: 0.4
+  tensor_parallel_size: 1
+  max_model_len: 4096
+
+# --- Final Judge — Portkey API (no GPU) ---
+final_judge_model:
+  backend: "portkey"
+  model_name: "@info-yd4956-anthropic/claude-sonnet-4-5"
+  temperature: 0.3
+  max_tokens: 1536
+
+# --- RLN ---
+rln:
+  update_frequency: "every_visit"
+  token_budget: 4096
+  max_prompt_length: 4096
+  compress_every_n: 5
+
+# --- Methods (irrelevant for the dumper but kept for run_experiment.py compat) ---
+methods:
+  - llm_as_rnn
+
+# --- Evaluation ---
+evaluation:
+  metrics:
+    - acc_at_1
+    - acc_at_5
